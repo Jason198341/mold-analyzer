@@ -49,6 +49,8 @@ def main():
                         help="최소 구배각 기준 (기본: 1.0도)")
     parser.add_argument("--mesh-quality", type=float, default=0.1,
                         help="메시 정밀도 - 작을수록 정밀 (기본: 0.1)")
+    parser.add_argument("--pdf", action="store_true",
+                        help="PDF 리포트도 함께 생성")
 
     args = parser.parse_args()
 
@@ -83,8 +85,10 @@ def main():
     print(f"  출력 파일:   {output_path}")
     print("=" * 60)
 
+    total_steps = 10 if args.pdf else 9
+
     # ── Step 1: CAD 파일 읽기 ─────────────────────
-    print("\n[1/6] CAD 파일 읽는 중...")
+    print(f"\n[1/{total_steps}] CAD 파일 읽는 중...")
     t0 = time.time()
 
     from core.reader import read_cad_file, extract_faces, get_bounding_box, get_shape_properties
@@ -101,7 +105,7 @@ def main():
     print(f"  > 체적: {shape_props['volume_mm3']:.1f} mm3")
 
     # ── Step 2: 구배각 분석 ─────────────────────────
-    print("\n[2/6] 구배각 분석 중...")
+    print(f"\n[2/{total_steps}] 구배각 분석 중...")
     t1 = time.time()
 
     from core.analysis import analyze_all_faces, summarize
@@ -115,7 +119,7 @@ def main():
           f"불충분: {cats.get('insufficient', 0)}  |  없음: {cats.get('zero', 0)}")
 
     # ── Step 3: 파팅라인 추정 ───────────────────────
-    print("\n[3/6] 파팅라인 추정 중...")
+    print(f"\n[3/{total_steps}] 파팅라인 추정 중...")
     t2 = time.time()
 
     from core.analysis import estimate_parting_line
@@ -128,7 +132,7 @@ def main():
           f"수직: {parting_info['vertical_face_count']}면")
 
     # ── Step 4: 언더컷 검출 ─────────────────────────
-    print("\n[4/6] 언더컷 검출 중...")
+    print(f"\n[4/{total_steps}] 언더컷 검출 중...")
     t3 = time.time()
 
     from core.analysis import detect_undercuts
@@ -144,8 +148,27 @@ def main():
     else:
         print(f"  > 언더컷 없음 ({time.time() - t3:.1f}s)")
 
-    # ── Step 5: 슬라이드 코어 분석 ──────────────────
-    print("\n[5/8] 슬라이드 코어 분석 중...")
+    # ── Step 5: 벽 두께 분석 ─────────────────────────
+    print(f"\n[5/{total_steps}] 벽 두께 분석 중...")
+    t_thick = time.time()
+
+    from core.analysis import analyze_wall_thickness
+
+    thickness_data = analyze_wall_thickness(shape, faces, n_samples=3)
+
+    if thickness_data["total_samples"] > 0:
+        print(f"  > 측정 완료 ({time.time() - t_thick:.1f}s)")
+        print(f"  > 최소: {thickness_data['min_thickness']:.2f}mm | "
+              f"최대: {thickness_data['max_thickness']:.2f}mm | "
+              f"평균: {thickness_data['avg_thickness']:.2f}mm")
+        if thickness_data["warnings"]:
+            for w in thickness_data["warnings"]:
+                print(f"  ! {w}")
+    else:
+        print(f"  > 벽 두께 측정 불가 ({time.time() - t_thick:.1f}s)")
+
+    # ── Step 6: 슬라이드 코어 분석 ──────────────────
+    print(f"\n[6/{total_steps}] 슬라이드 코어 분석 중...")
     t_slide = time.time()
 
     from core.slide_core import analyze_slides
@@ -163,13 +186,13 @@ def main():
     else:
         print(f"  > 슬라이드 불필요 ({time.time() - t_slide:.1f}s)")
 
-    # ── Step 6: 3D 메시 추출 ────────────────────────
-    print("\n[6/8] 3D 메시 생성 중...")
+    # ── Step 7: 3D 메시 추출 ────────────────────────
+    print(f"\n[7/{total_steps}] 3D 메시 생성 중...")
     t4 = time.time()
 
     from core.mesh import extract_mesh, extract_parting_line_points, mesh_to_json
 
-    mesh_data = extract_mesh(shape, face_results, args.mesh_quality)
+    mesh_data = extract_mesh(shape, face_results, args.mesh_quality, thickness_data)
     parting_points = extract_parting_line_points(
         shape, parting_info["parting_z"], tolerance=bbox["dz"] * 0.02
     )
@@ -177,8 +200,8 @@ def main():
 
     print(f"  > {mesh_data['triangle_count']}개 삼각형 생성 ({time.time() - t4:.1f}s)")
 
-    # ── Step 7: 리포트 생성 ─────────────────────────
-    print("\n[7/8] HTML 리포트 생성 중...")
+    # ── Step 8: 리포트 생성 ─────────────────────────
+    print(f"\n[8/{total_steps}] HTML 리포트 생성 중...")
     t5 = time.time()
 
     from core.report import generate_report
@@ -195,11 +218,37 @@ def main():
         mesh_json=mesh_json,
         slides=slides,
         mold_layout=mold_layout,
+        thickness_data=thickness_data,
         output_path=output_path,
     )
 
     total_time = time.time() - t0
     print(f"  > 리포트 저장: {output_path} ({time.time() - t5:.1f}s)")
+
+    # ── Step 9: PDF 리포트 (옵션) ────────────────────
+    pdf_path = None
+    if args.pdf:
+        print(f"\n[9/{total_steps}] PDF 리포트 생성 중...")
+        t6 = time.time()
+
+        from core.report import generate_pdf_report
+
+        pdf_path = output_path.replace(".html", ".pdf")
+        generate_pdf_report(
+            filename=filename,
+            shape_props=shape_props,
+            bbox=bbox,
+            summary=summary,
+            face_results=face_results,
+            undercuts=undercuts,
+            parting_info=parting_info,
+            slides=slides,
+            mold_layout=mold_layout,
+            thickness_data=thickness_data,
+            output_path=pdf_path,
+        )
+        print(f"  > PDF 저장: {pdf_path} ({time.time() - t6:.1f}s)")
+        total_time = time.time() - t0
 
     # ── 최종 요약 ───────────────────────────────────
     print("\n" + "=" * 60)
@@ -211,9 +260,12 @@ def main():
     print(f"  최소 구배각: {summary['min_draft_overall']:.1f}")
     print(f"  언더컷:      {len(undercuts)}개")
     print(f"  슬라이드:    {mold_layout['total_slides']}개")
+    print(f"  벽 두께:     {thickness_data['min_thickness']:.2f} ~ {thickness_data['max_thickness']:.2f}mm")
     print(f"  금형 복잡도: {mold_layout['complexity']}")
     print(f"  총 소요시간: {total_time:.1f}초")
     print(f"  리포트:      {os.path.abspath(output_path)}")
+    if pdf_path:
+        print(f"  PDF:         {os.path.abspath(pdf_path)}")
     print("=" * 60)
 
     # 문제가 있으면 경고

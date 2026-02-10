@@ -20,6 +20,7 @@ def generate_report(
     mesh_json: str,
     slides: list = None,
     mold_layout: dict = None,
+    thickness_data: dict = None,
     output_path: str = "report.html",
 ) -> str:
     """HTML 분석 리포트를 생성합니다."""
@@ -169,6 +170,81 @@ def generate_report(
           </div>
         </div>"""
 
+    # ── 벽 두께 분석 HTML ─────────────────────────────
+    thickness_data = thickness_data or {}
+    thickness_html = ""
+    if thickness_data.get("total_samples", 0) > 0:
+        tw = thickness_data.get("warnings", [])
+        tw_cards = ""
+        if tw:
+            tw_items = "".join(f"<li>{html.escape(w)}</li>" for w in tw)
+            tw_cards = f"""
+            <div class="alert" style="margin-bottom:1rem">
+              <strong>벽 두께 경고</strong>
+              <ul style="margin:0.5rem 0 0;padding-left:1.2rem">{tw_items}</ul>
+            </div>"""
+
+        # 히스토그램 SVG
+        histo = thickness_data.get("histogram")
+        histo_svg = ""
+        if histo and histo.get("bins"):
+            bins = histo["bins"]
+            max_bin = max(bins) if bins else 1
+            bar_w = 100 / len(bins)
+            bars = ""
+            for idx_b, cnt in enumerate(bins):
+                h = cnt / max_bin * 80 if max_bin > 0 else 0
+                x = idx_b * bar_w
+                val = histo["min"] + (idx_b + 0.5) * histo["bin_size"]
+                # 색상: <0.8 빨강, 0.8~1.5 주황, 1.5~3.0 초록, 3.0~4.0 노랑, >4.0 빨강
+                if val < 0.8:
+                    c = "#ff1a1a"
+                elif val < 1.5:
+                    c = "#ff8800"
+                elif val < 3.0:
+                    c = "#33cc55"
+                elif val < 4.0:
+                    c = "#ffdd00"
+                else:
+                    c = "#ff1a1a"
+                bars += f'<rect x="{x}%" y="{90-h}%" width="{bar_w*0.8}%" height="{h}%" fill="{c}" rx="2"/>'
+            histo_svg = f"""
+            <div style="margin-top:1rem">
+              <div style="font-size:0.8rem;color:var(--text-dim);margin-bottom:4px">두께 분포</div>
+              <svg viewBox="0 0 100 100" style="width:100%;height:80px;background:rgba(0,0,0,0.2);border-radius:6px">
+                {bars}
+              </svg>
+              <div style="display:flex;justify-content:space-between;font-size:0.7rem;color:var(--text-dim)">
+                <span>{histo['min']:.1f}mm</span><span>{histo['max']:.1f}mm</span>
+              </div>
+            </div>"""
+
+        thickness_html = f"""
+<h2>벽 두께 분석</h2>
+{tw_cards}
+<div class="grid">
+  <div class="card">
+    <table>
+      <tr><td>최소 두께</td><td><strong>{thickness_data['min_thickness']:.2f} mm</strong></td></tr>
+      <tr><td>최대 두께</td><td><strong>{thickness_data['max_thickness']:.2f} mm</strong></td></tr>
+      <tr><td>평균 두께</td><td>{thickness_data['avg_thickness']:.2f} mm</td></tr>
+      <tr><td>두께비 (최대/최소)</td><td>{thickness_data['thickness_ratio']:.1f}:1</td></tr>
+      <tr><td>측정 샘플 수</td><td>{thickness_data['total_samples']}개</td></tr>
+    </table>
+  </div>
+  <div class="card">
+    <div style="font-size:0.85rem;color:var(--text-dim)">
+      <div><span class="dot" style="background:#ff1a1a"></span> &lt;0.8mm: 충전불량 위험</div>
+      <div><span class="dot" style="background:#ff8800"></span> 0.8~1.5mm: 주의 필요</div>
+      <div><span class="dot" style="background:#33cc55"></span> 1.5~3.0mm: 양호</div>
+      <div><span class="dot" style="background:#ffdd00"></span> 3.0~4.0mm: 싱크마크 주의</div>
+      <div><span class="dot" style="background:#ff1a1a"></span> &gt;4.0mm: 싱크마크 위험</div>
+    </div>
+    {histo_svg}
+  </div>
+</div>
+"""
+
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     report_html = f"""<!DOCTYPE html>
@@ -296,7 +372,10 @@ def generate_report(
   <div class="legend-item"><span class="dot" style="background:#9999cc"></span> 수평면</div>
   <div class="legend-item"><span class="dot" style="background:#44aaff"></span> 파팅라인 (추정)</div>
 </div>
-<div style="font-size:0.75rem;color:#666;margin-bottom:8px">키보드: ← → 금형 열기/닫기 | ↑ ↓ 슬라이드 코어 후퇴/전진</div>
+<div style="display:flex;align-items:center;gap:1.5rem;margin-bottom:8px">
+  <span style="font-size:0.75rem;color:#666">키보드: ← → 금형 열기/닫기 | ↑ ↓ 슬라이드 코어 후퇴/전진</span>
+  <button id="btn-toggle-color" style="background:var(--accent);color:#fff;border:none;border-radius:6px;padding:4px 14px;font-size:0.75rem;cursor:pointer;font-weight:600">색상: 구배각</button>
+</div>
 <div id="viewer"></div>
 
 <div class="grid">
@@ -349,6 +428,8 @@ def generate_report(
     {undercut_rows}
   </table>
 </div>
+
+{thickness_html}
 
 {mold_summary_html}
 
@@ -522,6 +603,54 @@ if (meshData.positions && meshData.positions.length > 0) {{
   }});
 }}
 
+// ── 색상 토글 (구배각 ↔ 벽 두께) ──
+let colorMode = 'draft';
+const hasThickness = !!(meshData.thickness_colors && meshData.thickness_colors.length > 0);
+const btnToggle = document.getElementById('btn-toggle-color');
+
+// 두께 색상도 Cavity/Core 분리
+const cavDraft=[], corDraft=[], cavThick=[], corThick=[];
+if (hasThickness) {{
+  const triCnt2 = meshData.positions.length / 9;
+  for (let t = 0; t < triCnt2; t++) {{
+    const b = t * 9;
+    const avgZ = (meshData.positions[b+2] + meshData.positions[b+5] + meshData.positions[b+8]) / 3;
+    const isUpper = avgZ > partingZ;
+    for (let v = 0; v < 9; v++) {{
+      (isUpper ? cavDraft : corDraft).push(meshData.colors[b+v]);
+      (isUpper ? cavThick : corThick).push(meshData.thickness_colors[b+v]);
+    }}
+  }}
+}}
+
+// Phong 메시 참조 수집 (wireframe 제외)
+const colorTargets = [];
+function addColorTarget(grp, draftArr, thickArr) {{
+  grp.children.forEach(c => {{
+    if (c.isMesh && c.material && !c.material.wireframe) {{
+      colorTargets.push({{ mesh: c, draft: draftArr, thick: thickArr }});
+    }}
+  }});
+}}
+if (hasThickness) {{
+  addColorTarget(cavityGroup, cavDraft, cavThick);
+  addColorTarget(coreGroup, corDraft, corThick);
+}}
+
+if (btnToggle && hasThickness) {{
+  btnToggle.addEventListener('click', () => {{
+    colorMode = colorMode === 'draft' ? 'thickness' : 'draft';
+    btnToggle.textContent = colorMode === 'draft' ? '\\uc0c9\\uc0c1: \\uad6c\\ubc30\\uac01' : '\\uc0c9\\uc0c1: \\ubcbd \\ub450\\uaed8';
+    btnToggle.style.background = colorMode === 'draft' ? '#6366f1' : '#f59e0b';
+    colorTargets.forEach(ct => {{
+      const src = colorMode === 'draft' ? ct.draft : ct.thick;
+      ct.mesh.geometry.setAttribute('color', new THREE.Float32BufferAttribute(src, 3));
+    }});
+  }});
+}} else if (btnToggle) {{
+  btnToggle.style.display = 'none';
+}}
+
 // HUD 오버레이
 const hud = document.createElement('div');
 hud.style.cssText = 'position:absolute;bottom:12px;left:12px;background:rgba(15,18,25,0.88);border:1px solid rgba(99,102,241,0.3);border-radius:8px;padding:10px 14px;font:12px Segoe UI,sans-serif;color:#999;pointer-events:none;line-height:1.9;z-index:10';
@@ -586,4 +715,291 @@ window.addEventListener('resize', () => {{
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(report_html)
 
+    return output_path
+
+
+# ── PDF 리포트 생성 ─────────────────────────────────
+
+def generate_pdf_report(
+    filename: str,
+    shape_props: dict,
+    bbox: dict,
+    summary: dict,
+    face_results: list,
+    undercuts: list,
+    parting_info: dict,
+    slides: list = None,
+    mold_layout: dict = None,
+    thickness_data: dict = None,
+    output_path: str = "report.pdf",
+) -> str:
+    """PDF 분석 리포트를 생성합니다 (reportlab 사용)."""
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import mm
+    from reportlab.platypus import (
+        SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
+        PageBreak, HRFlowable,
+    )
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+    from reportlab.lib.enums import TA_CENTER, TA_LEFT
+
+    # 한글 폰트 등록 (시스템 폰트 탐색)
+    import os
+    font_registered = False
+    kr_font = "Helvetica"
+
+    font_paths = [
+        # Windows
+        "C:/Windows/Fonts/malgun.ttf",
+        "C:/Windows/Fonts/NanumGothic.ttf",
+        "C:/Windows/Fonts/gulim.ttc",
+        # macOS
+        "/System/Library/Fonts/AppleSDGothicNeo.ttc",
+        "/Library/Fonts/NanumGothic.ttf",
+        # Linux
+        "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    ]
+    for fp in font_paths:
+        if os.path.exists(fp):
+            try:
+                pdfmetrics.registerFont(TTFont("KRFont", fp))
+                kr_font = "KRFont"
+                font_registered = True
+                break
+            except Exception:
+                continue
+
+    doc = SimpleDocTemplate(
+        output_path,
+        pagesize=A4,
+        leftMargin=20*mm, rightMargin=20*mm,
+        topMargin=20*mm, bottomMargin=20*mm,
+    )
+
+    styles = getSampleStyleSheet()
+    styles.add(ParagraphStyle(
+        "KRTitle", parent=styles["Title"],
+        fontName=kr_font, fontSize=18, spaceAfter=12,
+    ))
+    styles.add(ParagraphStyle(
+        "KRH2", parent=styles["Heading2"],
+        fontName=kr_font, fontSize=13, spaceBefore=16, spaceAfter=8,
+        textColor=colors.HexColor("#4444aa"),
+    ))
+    styles.add(ParagraphStyle(
+        "KRBody", parent=styles["Normal"],
+        fontName=kr_font, fontSize=9, leading=13,
+    ))
+    styles.add(ParagraphStyle(
+        "KRSmall", parent=styles["Normal"],
+        fontName=kr_font, fontSize=7.5, leading=10,
+        textColor=colors.grey,
+    ))
+
+    story = []
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    # ─── Page 1: 요약 ───
+    story.append(Paragraph("Mold Analyzer Report", styles["KRTitle"]))
+    story.append(Paragraph(
+        f"File: {filename} | Date: {now}", styles["KRSmall"]
+    ))
+    story.append(Spacer(1, 8*mm))
+
+    # 형상 정보 테이블
+    story.append(Paragraph("1. Shape Information", styles["KRH2"]))
+
+    info_data = [
+        ["Volume", f"{shape_props['volume_mm3']:.1f} mm\u00b3"],
+        ["Surface Area", f"{shape_props['surface_area_mm2']:.1f} mm\u00b2"],
+        ["Bounding Box", f"{bbox['dx']:.1f} x {bbox['dy']:.1f} x {bbox['dz']:.1f} mm"],
+        ["Parting Line Z", f"{parting_info['parting_z']:.2f} mm ({parting_info.get('parting_method', 'histogram')})"],
+        ["Total Faces", f"{summary['total_faces']}"],
+    ]
+    t = Table(info_data, colWidths=[50*mm, 110*mm])
+    t.setStyle(TableStyle([
+        ("FONTNAME", (0, 0), (-1, -1), kr_font),
+        ("FONTSIZE", (0, 0), (-1, -1), 9),
+        ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#f0f0f8")),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#cccccc")),
+        ("PADDING", (0, 0), (-1, -1), 6),
+    ]))
+    story.append(t)
+    story.append(Spacer(1, 6*mm))
+
+    # 구배각 요약
+    story.append(Paragraph("2. Draft Angle Summary", styles["KRH2"]))
+
+    cat_labels_pdf = {
+        "good": "Good (3\u00b0+)",
+        "marginal": "Marginal (1~3\u00b0)",
+        "insufficient": "Insufficient (<1\u00b0)",
+        "zero": "No Draft (0\u00b0)",
+        "horizontal": "Horizontal",
+    }
+    draft_data = [["Category", "Count"]]
+    for cat, label in cat_labels_pdf.items():
+        count = summary["categories"].get(cat, 0)
+        if count > 0:
+            draft_data.append([label, str(count)])
+
+    draft_data.append(["Avg Draft", f"{summary['avg_draft_overall']:.1f}\u00b0"])
+    draft_data.append(["Min Draft", f"{summary['min_draft_overall']:.1f}\u00b0"])
+    draft_data.append(["Weighted Avg", f"{summary.get('weighted_avg_draft', 0):.1f}\u00b0"])
+
+    t2 = Table(draft_data, colWidths=[60*mm, 100*mm])
+    t2.setStyle(TableStyle([
+        ("FONTNAME", (0, 0), (-1, -1), kr_font),
+        ("FONTSIZE", (0, 0), (-1, -1), 9),
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#4444aa")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#cccccc")),
+        ("PADDING", (0, 0), (-1, -1), 5),
+    ]))
+    story.append(t2)
+    story.append(Spacer(1, 6*mm))
+
+    # 언더컷
+    story.append(Paragraph("3. Undercut Detection", styles["KRH2"]))
+    if undercuts:
+        story.append(Paragraph(
+            f"<b>{len(undercuts)} undercut region(s) detected.</b>",
+            styles["KRBody"],
+        ))
+        uc_data = [["Face #", "Type", "Draft", "Position", "Reason"]]
+        for uc in undercuts[:20]:
+            cx, cy, cz = uc["center"]
+            uc_data.append([
+                str(uc["face_id"]),
+                uc["surface_type"][:15],
+                f"{uc['avg_draft']:.1f}\u00b0",
+                f"({cx:.0f},{cy:.0f},{cz:.0f})",
+                uc["reason"][:30],
+            ])
+        t3 = Table(uc_data, colWidths=[15*mm, 30*mm, 15*mm, 35*mm, 65*mm])
+        t3.setStyle(TableStyle([
+            ("FONTNAME", (0, 0), (-1, -1), kr_font),
+            ("FONTSIZE", (0, 0), (-1, -1), 7.5),
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#aa4444")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#cccccc")),
+            ("PADDING", (0, 0), (-1, -1), 4),
+        ]))
+        story.append(t3)
+    else:
+        story.append(Paragraph("No undercuts detected.", styles["KRBody"]))
+
+    # ─── Page 2: 슬라이드 + 두께 ───
+    story.append(PageBreak())
+
+    slides = slides or []
+    mold_layout = mold_layout or {}
+
+    story.append(Paragraph("4. Slide Core Recommendations", styles["KRH2"]))
+    if slides:
+        slide_data = [["#", "Type", "Direction", "Stroke", "Depth", "Faces"]]
+        for s in slides:
+            slide_data.append([
+                str(s["id"]),
+                s["core_type_kr"][:10],
+                s["direction_name"],
+                f"{s['stroke']:.1f}mm",
+                f"{s['undercut_depth']:.1f}mm",
+                str(s["face_count"]),
+            ])
+        ts = Table(slide_data, colWidths=[10*mm, 25*mm, 30*mm, 25*mm, 25*mm, 15*mm])
+        ts.setStyle(TableStyle([
+            ("FONTNAME", (0, 0), (-1, -1), kr_font),
+            ("FONTSIZE", (0, 0), (-1, -1), 8),
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#b58900")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#cccccc")),
+            ("PADDING", (0, 0), (-1, -1), 4),
+        ]))
+        story.append(ts)
+
+        if mold_layout:
+            story.append(Spacer(1, 4*mm))
+            story.append(Paragraph(
+                f"Mold Complexity: <b>{mold_layout.get('complexity', '-')}</b> | "
+                f"Max Stroke: {mold_layout.get('max_stroke', 0):.1f}mm",
+                styles["KRBody"],
+            ))
+    else:
+        story.append(Paragraph("No slide cores required.", styles["KRBody"]))
+
+    story.append(Spacer(1, 6*mm))
+
+    # 벽 두께
+    thickness_data = thickness_data or {}
+    story.append(Paragraph("5. Wall Thickness Analysis", styles["KRH2"]))
+    if thickness_data.get("total_samples", 0) > 0:
+        thick_info = [
+            ["Min Thickness", f"{thickness_data['min_thickness']:.2f} mm"],
+            ["Max Thickness", f"{thickness_data['max_thickness']:.2f} mm"],
+            ["Avg Thickness", f"{thickness_data['avg_thickness']:.2f} mm"],
+            ["Thickness Ratio", f"{thickness_data['thickness_ratio']:.1f}:1"],
+            ["Samples", f"{thickness_data['total_samples']}"],
+        ]
+        tt = Table(thick_info, colWidths=[50*mm, 110*mm])
+        tt.setStyle(TableStyle([
+            ("FONTNAME", (0, 0), (-1, -1), kr_font),
+            ("FONTSIZE", (0, 0), (-1, -1), 9),
+            ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#f0f8f0")),
+            ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#cccccc")),
+            ("PADDING", (0, 0), (-1, -1), 6),
+        ]))
+        story.append(tt)
+
+        # 경고 표시
+        for w in thickness_data.get("warnings", []):
+            story.append(Spacer(1, 2*mm))
+            story.append(Paragraph(f"WARNING: {w}", ParagraphStyle(
+                "Warn", parent=styles["KRBody"],
+                textColor=colors.HexColor("#cc0000"), fontSize=9,
+            )))
+    else:
+        story.append(Paragraph("Wall thickness measurement not available.", styles["KRBody"]))
+
+    story.append(Spacer(1, 8*mm))
+
+    # 면 상세 (상위 30개)
+    story.append(Paragraph("6. Face Detail (Top 30 by Draft)", styles["KRH2"]))
+    sorted_faces = sorted(face_results, key=lambda r: r["avg_draft"])
+    fd_data = [["#", "Type", "Area", "Min\u00b0", "Avg\u00b0", "Max\u00b0", "Cat."]]
+    for r in sorted_faces[:30]:
+        fd_data.append([
+            str(r["face_id"]),
+            r["surface_type"][:12],
+            f"{r['area']:.1f}",
+            f"{r['min_draft']:.1f}",
+            f"{r['avg_draft']:.1f}",
+            f"{r['max_draft']:.1f}",
+            r["draft_category"][:8],
+        ])
+    tf = Table(fd_data, colWidths=[12*mm, 28*mm, 18*mm, 16*mm, 16*mm, 16*mm, 20*mm])
+    tf.setStyle(TableStyle([
+        ("FONTNAME", (0, 0), (-1, -1), kr_font),
+        ("FONTSIZE", (0, 0), (-1, -1), 7),
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#444466")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#dddddd")),
+        ("PADDING", (0, 0), (-1, -1), 3),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f8f8fc")]),
+    ]))
+    story.append(tf)
+
+    # 푸터
+    story.append(Spacer(1, 10*mm))
+    story.append(HRFlowable(width="100%", color=colors.HexColor("#cccccc")))
+    story.append(Paragraph(
+        f"Mold Analyzer Report | {now} | Open CASCADE",
+        styles["KRSmall"],
+    ))
+
+    doc.build(story)
     return output_path

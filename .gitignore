@@ -10,6 +10,7 @@ __pycache__/
 *.iges
 *.3dxml
 *_mold_report.html
+*_mold_report.pdf
 .venv/
 dist/
 build/

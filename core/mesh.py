@@ -30,16 +30,47 @@ def _draft_to_color(avg_draft: float, category: str) -> tuple:
         return (0.5, 0.5, 0.5)
 
 
-def extract_mesh(shape, face_results: list, deflection: float = 0.1) -> dict:
-    """Shape을 테셀레이션하여 three.js용 메시 데이터를 추출합니다."""
+def _thickness_to_color(avg_thickness: float) -> tuple:
+    """벽 두께에 따른 RGB 색상 (0~1 범위).
+
+    <0.8mm: 빨강(충전불량), 0.8~1.5: 주황, 1.5~3.0: 초록(양호),
+    3.0~4.0: 노랑, >4.0: 빨강(싱크마크), 0: 회색(측정불가)
+    """
+    if avg_thickness <= 0:
+        return (0.5, 0.5, 0.5)
+    elif avg_thickness < 0.8:
+        return (1.0, 0.1, 0.1)
+    elif avg_thickness < 1.5:
+        t = (avg_thickness - 0.8) / 0.7
+        return (1.0, 0.4 + 0.4 * t, 0.0)
+    elif avg_thickness < 3.0:
+        return (0.2, 0.8, 0.3)
+    elif avg_thickness < 4.0:
+        t = (avg_thickness - 3.0) / 1.0
+        return (0.8 + 0.2 * t, 0.8 - 0.4 * t, 0.0)
+    else:
+        return (1.0, 0.1, 0.1)
+
+
+def extract_mesh(shape, face_results: list, deflection: float = 0.1,
+                  thickness_data: dict = None) -> dict:
+    """Shape을 테셀레이션하여 three.js용 메시 데이터를 추출합니다.
+
+    thickness_data가 주어지면 두께 기반 색상 배열도 함께 생성합니다.
+    """
     mesh = BRepMesh_IncrementalMesh(shape, deflection, False, 0.5, True)
     mesh.Perform()
 
     positions = []
     colors = []
+    thickness_colors = []
     normals_out = []
 
     result_map = {r["face_id"]: r for r in face_results}
+    thickness_map = {}
+    if thickness_data:
+        for ft in thickness_data.get("face_thicknesses", []):
+            thickness_map[ft["face_id"]] = ft
 
     explorer = TopExp_Explorer(shape, TopAbs_FACE)
     face_idx = 0
@@ -58,6 +89,10 @@ def extract_mesh(shape, face_results: list, deflection: float = 0.1) -> dict:
         category = result.get("draft_category", "unknown")
         avg_draft = result.get("avg_draft", 0)
         r, g, b = _draft_to_color(avg_draft, category)
+
+        # 두께 색상
+        t_info = thickness_map.get(face_idx, {})
+        tr, tg, tb = _thickness_to_color(t_info.get("avg_thickness", 0))
 
         transformation = loc.Transformation()
         n_triangles = triangulation.NbTriangles()
@@ -89,18 +124,22 @@ def extract_mesh(shape, face_results: list, deflection: float = 0.1) -> dict:
             for p in [p1, p2, p3]:
                 positions.extend([p.X(), p.Y(), p.Z()])
                 colors.extend([r, g, b])
+                thickness_colors.extend([tr, tg, tb])
                 normals_out.extend([nx, ny, nz])
 
         explorer.Next()
         face_idx += 1
 
-    return {
+    result = {
         "positions": positions,
         "colors": colors,
         "normals": normals_out,
         "vertex_count": len(positions) // 3,
         "triangle_count": len(positions) // 9,
     }
+    if thickness_data:
+        result["thickness_colors"] = thickness_colors
+    return result
 
 
 def extract_parting_line_points(shape, parting_z: float,
@@ -145,4 +184,6 @@ def mesh_to_json(mesh_data: dict, parting_points: list = None) -> str:
     }
     if parting_points:
         export["parting_line"] = parting_points
+    if "thickness_colors" in mesh_data:
+        export["thickness_colors"] = mesh_data["thickness_colors"]
     return json.dumps(export)
