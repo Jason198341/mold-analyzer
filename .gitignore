@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.env
+*.stl
+*.step
+*.stp
+*.igs
+*.iges
+*.3dxml
+*_mold_report.html
+.venv/
+dist/
+build/
