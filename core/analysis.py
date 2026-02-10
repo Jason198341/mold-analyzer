@@ -27,6 +27,19 @@ from OCP.GeomAbs import (
 )
 
 
+def axis_index_from_dir(opening_dir: gp_Dir) -> int:
+    """opening_dir에서 주축 인덱스(0=X, 1=Y, 2=Z)를 반환합니다."""
+    components = [abs(opening_dir.X()), abs(opening_dir.Y()), abs(opening_dir.Z())]
+    return components.index(max(components))
+
+
+def _bbox_for_axis(bbox: dict, axis_idx: int):
+    """축 인덱스에 해당하는 bbox min/max/d 값을 반환합니다."""
+    keys = [("xmin", "xmax", "dx"), ("ymin", "ymax", "dy"), ("zmin", "zmax", "dz")]
+    k_min, k_max, k_d = keys[axis_idx]
+    return bbox[k_min], bbox[k_max], bbox[k_d]
+
+
 # ─── 면 유형 이름 매핑 ───────────────────────────────
 
 SURFACE_TYPE_NAMES = {
@@ -247,9 +260,10 @@ def _silhouette_parting_line(shape, faces, opening_dir):
                     silhouette_points.append([pnt.X(), pnt.Y(), pnt.Z()])
 
         if len(silhouette_points) >= 3:
-            # 실루엣 포인트의 평균 Z → 파팅라인 Z
-            avg_z = sum(p[2] for p in silhouette_points) / len(silhouette_points)
-            return silhouette_points, avg_z
+            # 실루엣 포인트의 열림 축 성분 평균 → 파팅라인 값
+            ax = axis_index_from_dir(opening_dir)
+            avg_val = sum(p[ax] for p in silhouette_points) / len(silhouette_points)
+            return silhouette_points, avg_val
 
     except Exception:
         pass
@@ -262,61 +276,68 @@ def estimate_parting_line(shape, faces: list, face_results: list,
     """파팅라인을 추정합니다.
 
     1차: 실루엣 엣지 방식 (B-Rep 토폴로지 기반)
-    2차: Z 히스토그램 방식 (fallback)
+    2차: 히스토그램 방식 (fallback)
+    opening_dir에 따라 올바른 축 기준으로 분석합니다.
     """
     if opening_dir is None:
         opening_dir = gp_Dir(0, 0, 1)
 
+    ax = axis_index_from_dir(opening_dir)
+    axis_names = ["X", "Y", "Z"]
+    opening_sign = [opening_dir.X(), opening_dir.Y(), opening_dir.Z()][ax]
+
     from .reader import get_bounding_box
     bbox = get_bounding_box(shape)
 
-    z_mid = (bbox["zmin"] + bbox["zmax"]) / 2
+    ax_min, ax_max, ax_d = _bbox_for_axis(bbox, ax)
+    ax_mid = (ax_min + ax_max) / 2
 
-    upper_faces = []
-    lower_faces = []
+    upper_faces = []   # Cavity 측 (열림 방향 쪽)
+    lower_faces = []   # Core 측 (반대쪽)
     vertical_faces = []
 
     for result in face_results:
         if not result["normals"]:
             continue
 
-        avg_nz = sum(n[2] for n in result["normals"]) / len(result["normals"])
+        # 열림 방향 축의 법선 성분 평균
+        avg_n_ax = sum(n[ax] for n in result["normals"]) / len(result["normals"])
 
-        if avg_nz > 0.1:
+        if avg_n_ax > 0.1:
             upper_faces.append(result["face_id"])
-        elif avg_nz < -0.1:
+        elif avg_n_ax < -0.1:
             lower_faces.append(result["face_id"])
         else:
             vertical_faces.append(result["face_id"])
 
     # ── 1차: 실루엣 엣지 방식 ──
-    silhouette_points, silhouette_z = _silhouette_parting_line(shape, faces, opening_dir)
+    silhouette_points, silhouette_val = _silhouette_parting_line(shape, faces, opening_dir)
     method = "silhouette"
 
-    if silhouette_z is not None:
-        estimated_z = silhouette_z
+    if silhouette_val is not None:
+        estimated_val = silhouette_val
     else:
-        # ── 2차: Z 히스토그램 방식 (fallback) ──
+        # ── 2차: 히스토그램 방식 (fallback) ──
         method = "histogram"
-        z_centers = [r["center"][2] for r in face_results if r["center"]]
-        if z_centers:
+        centers = [r["center"][ax] for r in face_results if r["center"]]
+        if centers:
             n_bins = 20
-            z_range = bbox["dz"] if bbox["dz"] > 0 else 1
-            bin_size = z_range / n_bins
+            ax_range = ax_d if ax_d > 0 else 1
+            bin_size = ax_range / n_bins
             bins = [0] * n_bins
-            for z in z_centers:
-                idx = int((z - bbox["zmin"]) / bin_size)
+            for c in centers:
+                idx = int((c - ax_min) / bin_size)
                 idx = min(idx, n_bins - 1)
                 bins[idx] += 1
 
             max_bin = bins.index(max(bins))
-            estimated_z = bbox["zmin"] + (max_bin + 0.5) * bin_size
+            estimated_val = ax_min + (max_bin + 0.5) * bin_size
         else:
-            estimated_z = z_mid
+            estimated_val = ax_mid
 
     return {
-        "parting_z": estimated_z,
-        "z_mid": z_mid,
+        "parting_z": estimated_val,  # 호환성: 키 이름 유지, 값은 올바른 축 기준
+        "z_mid": ax_mid,
         "upper_face_count": len(upper_faces),
         "lower_face_count": len(lower_faces),
         "vertical_face_count": len(vertical_faces),
@@ -324,6 +345,8 @@ def estimate_parting_line(shape, faces: list, face_results: list,
         "silhouette_points": silhouette_points or [],
         "parting_method": method,
         "bbox": bbox,
+        "axis_index": ax,
+        "axis_name": axis_names[ax],
     }
 
 
@@ -331,7 +354,21 @@ def estimate_parting_line(shape, faces: list, face_results: list,
 
 def detect_undercuts(face_results: list, parting_z: float,
                      opening_dir: gp_Dir = None) -> list:
-    """파팅라인 기준으로 언더컷을 상세 검출합니다."""
+    """파팅라인 기준으로 언더컷을 상세 검출합니다.
+
+    opening_dir에 따라 올바른 축 기준으로 판별합니다.
+    """
+    if opening_dir is None:
+        opening_dir = gp_Dir(0, 0, 1)
+
+    ax = axis_index_from_dir(opening_dir)
+    axis_labels = {
+        0: ("Cavity 측 언더컷 (법선이 -X를 향함)", "Core 측 언더컷 (법선이 +X를 향함)"),
+        1: ("Cavity 측 언더컷 (법선이 -Y를 향함)", "Core 측 언더컷 (법선이 +Y를 향함)"),
+        2: ("Cavity 측 언더컷 (법선이 아래를 향함)", "Core 측 언더컷 (법선이 위를 향함)"),
+    }
+    cavity_reason, core_reason = axis_labels[ax]
+
     undercuts = []
 
     for result in face_results:
@@ -342,19 +379,21 @@ def detect_undercuts(face_results: list, parting_z: float,
         if avg_draft > 80:
             continue
 
-        center_z = result["center"][2]
-        avg_nz = sum(n[2] for n in result["normals"]) / len(result["normals"])
+        center_ax = result["center"][ax]
+        avg_n_ax = sum(n[ax] for n in result["normals"]) / len(result["normals"])
 
         is_undercut = False
         reason = ""
 
-        if center_z > parting_z and avg_nz < -0.1 and avg_draft < 45:
+        # Cavity 측: 열림 방향 쪽인데 법선이 반대
+        if center_ax > parting_z and avg_n_ax < -0.1 and avg_draft < 45:
             is_undercut = True
-            reason = "Cavity 측 언더컷 (법선이 아래를 향함)"
+            reason = cavity_reason
 
-        if center_z < parting_z and avg_nz > 0.1 and avg_draft < 45:
+        # Core 측: 반대쪽인데 법선이 열림 방향
+        if center_ax < parting_z and avg_n_ax > 0.1 and avg_draft < 45:
             is_undercut = True
-            reason = "Core 측 언더컷 (법선이 위를 향함)"
+            reason = core_reason
 
         if avg_draft < 0.5 and not is_undercut:
             is_undercut = True

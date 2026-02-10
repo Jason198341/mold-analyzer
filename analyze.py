@@ -122,11 +122,13 @@ def main():
     print(f"\n[3/{total_steps}] 파팅라인 추정 중...")
     t2 = time.time()
 
-    from core.analysis import estimate_parting_line
+    from core.analysis import estimate_parting_line, axis_index_from_dir
 
     parting_info = estimate_parting_line(shape, faces, face_results, opening_dir)
+    ax_idx = parting_info["axis_index"]
+    ax_name = parting_info["axis_name"]
 
-    print(f"  > 추정 파팅라인 Z = {parting_info['parting_z']:.2f} mm ({time.time() - t2:.1f}s)")
+    print(f"  > 추정 파팅라인 {ax_name} = {parting_info['parting_z']:.2f} mm ({time.time() - t2:.1f}s)")
     print(f"  > Cavity: {parting_info['upper_face_count']}면  |  "
           f"Core: {parting_info['lower_face_count']}면  |  "
           f"수직: {parting_info['vertical_face_count']}면")
@@ -174,7 +176,8 @@ def main():
     from core.slide_core import analyze_slides
 
     slides, mold_layout = analyze_slides(
-        undercuts, face_results, bbox, parting_info["parting_z"]
+        undercuts, face_results, bbox, parting_info["parting_z"],
+        axis_index=ax_idx
     )
 
     if slides:
@@ -193,8 +196,11 @@ def main():
     from core.mesh import extract_mesh, extract_parting_line_points, mesh_to_json
 
     mesh_data = extract_mesh(shape, face_results, args.mesh_quality, thickness_data)
+    bbox_d_keys = ["dx", "dy", "dz"]
     parting_points = extract_parting_line_points(
-        shape, parting_info["parting_z"], tolerance=bbox["dz"] * 0.02
+        shape, parting_info["parting_z"],
+        tolerance=bbox[bbox_d_keys[ax_idx]] * 0.02,
+        axis_index=ax_idx
     )
     mesh_json = mesh_to_json(mesh_data, parting_points)
 
@@ -220,6 +226,8 @@ def main():
         mold_layout=mold_layout,
         thickness_data=thickness_data,
         output_path=output_path,
+        axis_name=ax_name,
+        axis_index=ax_idx,
     )
 
     total_time = time.time() - t0

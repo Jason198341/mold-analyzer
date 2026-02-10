@@ -143,10 +143,17 @@ def extract_mesh(shape, face_results: list, deflection: float = 0.1,
 
 
 def extract_parting_line_points(shape, parting_z: float,
-                                tolerance: float = 1.0) -> list:
-    """파팅라인 근처의 Edge 점들을 추출합니다."""
+                                tolerance: float = 1.0,
+                                axis_index: int = 2) -> list:
+    """파팅라인 근처의 Edge 점들을 추출합니다.
+
+    Args:
+        axis_index: 열림 방향 축 인덱스 (0=X, 1=Y, 2=Z)
+    """
     points = []
     explorer = TopExp_Explorer(shape, TopAbs_EDGE)
+    # 축별 좌표 접근: 0=X(), 1=Y(), 2=Z()
+    _get_coord = [lambda p: p.X(), lambda p: p.Y(), lambda p: p.Z()]
 
     while explorer.More():
         edge = TopoDS.Edge_s(explorer.Current())
@@ -161,7 +168,8 @@ def extract_parting_line_points(shape, parting_z: float,
         for k in range(n_pts + 1):
             u = u_start + (u_end - u_start) * k / n_pts
             pnt = curve.Value(u)
-            if abs(pnt.Z() - parting_z) < tolerance:
+            coord_val = _get_coord[axis_index](pnt)
+            if abs(coord_val - parting_z) < tolerance:
                 edge_near_parting = True
                 edge_points.append([pnt.X(), pnt.Y(), pnt.Z()])
 

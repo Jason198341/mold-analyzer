@@ -22,6 +22,8 @@ def generate_report(
     mold_layout: dict = None,
     thickness_data: dict = None,
     output_path: str = "report.html",
+    axis_name: str = "Z",
+    axis_index: int = 2,
 ) -> str:
     """HTML 분석 리포트를 생성합니다."""
 
@@ -341,7 +343,7 @@ def generate_report(
 
 <h1>금형 분석 리포트</h1>
 <div class="meta">
-  파일: {html.escape(filename)} | 분석일: {now} | 열림 방향: Z+ (상방)
+  파일: {html.escape(filename)} | 분석일: {now} | 열림 방향: {axis_name}+
 </div>
 
 <div class="stats">
@@ -385,7 +387,7 @@ def generate_report(
       <tr><td>체적</td><td>{shape_props['volume_mm3']:.1f} mm³</td></tr>
       <tr><td>표면적</td><td>{shape_props['surface_area_mm2']:.1f} mm²</td></tr>
       <tr><td>크기 (X×Y×Z)</td><td>{bbox['dx']:.1f} × {bbox['dy']:.1f} × {bbox['dz']:.1f} mm</td></tr>
-      <tr><td>추정 파팅라인 Z</td><td>{parting_info['parting_z']:.2f} mm</td></tr>
+      <tr><td>추정 파팅라인 {axis_name}</td><td>{parting_info['parting_z']:.2f} mm</td></tr>
     </table>
   </div>
 
@@ -495,9 +497,11 @@ scene.add(dirLight2);
 
 // 메시 데이터 로드
 const meshData = {mesh_json};
-const partingZ = {parting_info['parting_z']};
+const partingVal = {parting_info['parting_z']};
 const slideData = {slide_arrows_json};
-const bboxDz = {bbox['dz']};
+const axisIndex = {axis_index};  // 0=X, 1=Y, 2=Z
+const bboxD = [{bbox['dx']}, {bbox['dy']}, {bbox['dz']}];
+const bboxDz = bboxD[axisIndex];
 
 // 금형 애니메이션 상태
 let moldOpen = 0, slideOut = 0;
@@ -514,13 +518,14 @@ const slideGroupList = [];
 let viewRadius = 100;
 
 if (meshData.positions && meshData.positions.length > 0) {{
-  // Cavity(상부) / Core(하부) 분리 - 파팅라인 기준
+  // Cavity(상부) / Core(하부) 분리 - 파팅라인 기준 (열림 축에 따라)
   const cavP=[],cavC=[],cavN=[], corP=[],corC=[],corN=[];
   const triCnt = meshData.positions.length / 9;
   for (let t = 0; t < triCnt; t++) {{
     const b = t * 9;
-    const avgZ = (meshData.positions[b+2] + meshData.positions[b+5] + meshData.positions[b+8]) / 3;
-    const tg = avgZ > partingZ ? [cavP,cavC,cavN] : [corP,corC,corN];
+    // 열림 축 좌표로 Cavity/Core 분리 (axisIndex: 0=X, 1=Y, 2=Z)
+    const avgAx = (meshData.positions[b+axisIndex] + meshData.positions[b+3+axisIndex] + meshData.positions[b+6+axisIndex]) / 3;
+    const tg = avgAx > partingVal ? [cavP,cavC,cavN] : [corP,corC,corN];
     for (let v = 0; v < 9; v++) {{
       tg[0].push(meshData.positions[b+v]);
       tg[1].push(meshData.colors[b+v]);
@@ -614,8 +619,8 @@ if (hasThickness) {{
   const triCnt2 = meshData.positions.length / 9;
   for (let t = 0; t < triCnt2; t++) {{
     const b = t * 9;
-    const avgZ = (meshData.positions[b+2] + meshData.positions[b+5] + meshData.positions[b+8]) / 3;
-    const isUpper = avgZ > partingZ;
+    const avgAx2 = (meshData.positions[b+axisIndex] + meshData.positions[b+3+axisIndex] + meshData.positions[b+6+axisIndex]) / 3;
+    const isUpper = avgAx2 > partingVal;
     for (let v = 0; v < 9; v++) {{
       (isUpper ? cavDraft : corDraft).push(meshData.colors[b+v]);
       (isUpper ? cavThick : corThick).push(meshData.thickness_colors[b+v]);
@@ -662,9 +667,13 @@ container.appendChild(hud);
 const hudM = document.getElementById('hud-mold');
 const hudS = document.getElementById('hud-slide');
 
+// 열림 축에 따른 position 속성 매핑
+const axisProps = ['x', 'y', 'z'];
+const openProp = axisProps[axisIndex];
+
 function updateMold() {{
-  cavityGroup.position.z = moldOpen;
-  coreGroup.position.z = -moldOpen;
+  cavityGroup.position[openProp] = moldOpen;
+  coreGroup.position[openProp] = -moldOpen;
   slideGroupList.forEach(sg => {{
     const off = sg.dir.clone().multiplyScalar(slideOut / MAX_SLIDE * sg.stroke);
     sg.group.position.copy(sg.origin).add(off);

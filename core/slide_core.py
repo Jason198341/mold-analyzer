@@ -15,49 +15,84 @@ from OCP.gp import gp_Dir
 
 # ─── 슬라이드 방향 정규화 ───────────────────────────
 
-# 8방향으로 정규화 (실제 금형은 직교 방향이 대부분)
-CANONICAL_DIRECTIONS = {
-    "+X":  np.array([ 1,  0, 0]),
-    "-X":  np.array([-1,  0, 0]),
-    "+Y":  np.array([ 0,  1, 0]),
-    "-Y":  np.array([ 0, -1, 0]),
-    "+X+Y": np.array([ 1,  1, 0]) / math.sqrt(2),
-    "+X-Y": np.array([ 1, -1, 0]) / math.sqrt(2),
-    "-X+Y": np.array([-1,  1, 0]) / math.sqrt(2),
-    "-X-Y": np.array([-1, -1, 0]) / math.sqrt(2),
-}
+def _get_canonical_directions(axis_index: int = 2) -> dict:
+    """열림 축에 따라 슬라이드 이동 가능 방향을 반환합니다.
+
+    슬라이드는 열림 방향에 수직인 평면에서 이동합니다.
+    - Z축 열림 → XY 평면에서 이동
+    - X축 열림 → YZ 평면에서 이동
+    - Y축 열림 → XZ 평면에서 이동
+    """
+    if axis_index == 0:  # X축 열림 → YZ 평면
+        return {
+            "+Y": np.array([0, 1, 0]),
+            "-Y": np.array([0, -1, 0]),
+            "+Z": np.array([0, 0, 1]),
+            "-Z": np.array([0, 0, -1]),
+            "+Y+Z": np.array([0, 1, 1]) / math.sqrt(2),
+            "+Y-Z": np.array([0, 1, -1]) / math.sqrt(2),
+            "-Y+Z": np.array([0, -1, 1]) / math.sqrt(2),
+            "-Y-Z": np.array([0, -1, -1]) / math.sqrt(2),
+        }
+    elif axis_index == 1:  # Y축 열림 → XZ 평면
+        return {
+            "+X": np.array([1, 0, 0]),
+            "-X": np.array([-1, 0, 0]),
+            "+Z": np.array([0, 0, 1]),
+            "-Z": np.array([0, 0, -1]),
+            "+X+Z": np.array([1, 0, 1]) / math.sqrt(2),
+            "+X-Z": np.array([1, 0, -1]) / math.sqrt(2),
+            "-X+Z": np.array([-1, 0, 1]) / math.sqrt(2),
+            "-X-Z": np.array([-1, 0, -1]) / math.sqrt(2),
+        }
+    else:  # Z축 열림 → XY 평면 (기본)
+        return {
+            "+X": np.array([1, 0, 0]),
+            "-X": np.array([-1, 0, 0]),
+            "+Y": np.array([0, 1, 0]),
+            "-Y": np.array([0, -1, 0]),
+            "+X+Y": np.array([1, 1, 0]) / math.sqrt(2),
+            "+X-Y": np.array([1, -1, 0]) / math.sqrt(2),
+            "-X+Y": np.array([-1, 1, 0]) / math.sqrt(2),
+            "-X-Y": np.array([-1, -1, 0]) / math.sqrt(2),
+        }
 
 
-def _nearest_canonical(direction: np.ndarray) -> tuple:
+def _nearest_canonical(direction: np.ndarray, axis_index: int = 2) -> tuple:
     """주어진 방향을 가장 가까운 정규 방향으로 매핑합니다."""
-    best_name = "+X"
+    canonical_dirs = _get_canonical_directions(axis_index)
+    best_name = list(canonical_dirs.keys())[0]
     best_dot = -999
-    for name, canonical in CANONICAL_DIRECTIONS.items():
+    for name, canonical in canonical_dirs.items():
         dot = np.dot(direction, canonical)
         if dot > best_dot:
             best_dot = dot
             best_name = name
-    return best_name, CANONICAL_DIRECTIONS[best_name]
+    return best_name, canonical_dirs[best_name]
 
 
-def _compute_slide_direction(normals: list, opening_dir_z: bool = True) -> np.ndarray:
+def _compute_slide_direction(normals: list, axis_index: int = 2) -> np.ndarray:
     """언더컷 면의 법선들로부터 슬라이드 방향을 계산합니다.
 
-    슬라이드는 언더컷 법선의 수평 성분 방향으로 이동해야 합니다.
+    슬라이드는 열림 방향에 수직인 평면에서 이동합니다.
+    열림 축 성분을 제거하여 투영합니다.
     """
     if not normals:
-        return np.array([1, 0, 0])
+        # 기본 방향: 열림 축이 아닌 첫 번째 축
+        default = [0, 0, 0]
+        default[(axis_index + 1) % 3] = 1
+        return np.array(default)
 
-    # 법선들의 평균
     avg_normal = np.mean(normals, axis=0)
 
-    # 열림 방향(Z) 성분 제거 → 수평면에 투영
-    if opening_dir_z:
-        avg_normal[2] = 0
+    # 열림 방향 성분 제거 → 수직 평면에 투영
+    avg_normal[axis_index] = 0
 
     norm = np.linalg.norm(avg_normal)
     if norm < 1e-10:
-        return np.array([1, 0, 0])
+        default = [0, 0, 0]
+        default[(axis_index + 1) % 3] = 1
+        return np.array(default)
 
     return avg_normal / norm
 
@@ -66,7 +101,8 @@ def _compute_slide_direction(normals: list, opening_dir_z: bool = True) -> np.nd
 
 def group_undercuts(undercuts: list, face_results: list,
                     distance_threshold: float = 20.0,
-                    angle_threshold: float = 45.0) -> list:
+                    angle_threshold: float = 45.0,
+                    axis_index: int = 2) -> list:
     """가까이 있고 비슷한 방향의 언더컷들을 그룹핑합니다.
 
     같은 슬라이드 코어로 처리할 수 있는 언더컷 면들을 묶습니다.
@@ -76,6 +112,7 @@ def group_undercuts(undercuts: list, face_results: list,
         face_results: analyze_all_faces()의 결과
         distance_threshold: 같은 그룹으로 묶을 최대 거리 (mm)
         angle_threshold: 같은 그룹으로 묶을 최대 법선 각도 차이 (도)
+        axis_index: 열림 방향 축 인덱스 (0=X, 1=Y, 2=Z)
 
     Returns:
         list of groups, each group is a dict with faces, direction, etc.
@@ -94,11 +131,12 @@ def group_undercuts(undercuts: list, face_results: list,
 
         if normals:
             avg_normal = np.mean(normals, axis=0)
-            # 수평 성분만 (Z 제거)
-            horizontal = np.array([avg_normal[0], avg_normal[1], 0])
-            h_norm = np.linalg.norm(horizontal)
+            # 열림 방향 축 성분 제거 → 수직 평면에 투영
+            projected = avg_normal.copy()
+            projected[axis_index] = 0
+            h_norm = np.linalg.norm(projected)
             if h_norm > 1e-10:
-                horizontal = horizontal / h_norm
+                horizontal = projected / h_norm
             else:
                 horizontal = np.array([0, 0, 0])
         else:
@@ -152,8 +190,12 @@ def group_undercuts(undercuts: list, face_results: list,
 
 # ─── 슬라이드 코어 분석 ────────────────────────────
 
-def analyze_slide_cores(groups: list, bbox: dict, parting_z: float) -> list:
+def analyze_slide_cores(groups: list, bbox: dict, parting_z: float,
+                        axis_index: int = 2) -> list:
     """각 그룹에 대해 슬라이드 코어 상세 분석을 수행합니다.
+
+    Args:
+        axis_index: 열림 방향 축 인덱스 (0=X, 1=Y, 2=Z)
 
     Returns:
         list of slide_core dicts
@@ -178,8 +220,8 @@ def analyze_slide_cores(groups: list, bbox: dict, parting_z: float) -> list:
         np_centers = np.array(all_centers)
 
         # ── 슬라이드 방향 계산 ──
-        slide_dir = _compute_slide_direction(all_normals)
-        dir_name, canonical_dir = _nearest_canonical(slide_dir)
+        slide_dir = _compute_slide_direction(all_normals, axis_index)
+        dir_name, canonical_dir = _nearest_canonical(slide_dir, axis_index)
 
         # ── 슬라이드 영역 바운딩 박스 ──
         group_min = np_centers.min(axis=0)
@@ -216,8 +258,9 @@ def analyze_slide_cores(groups: list, bbox: dict, parting_z: float) -> list:
 
         # ── 슬라이드 vs 경사코어 판단 ──
         # 파팅라인 근처 + 면적 작음 → 경사코어(리프터) 가능
-        avg_z = group_center[2]
-        near_parting = abs(avg_z - parting_z) < bbox.get("dz", 100) * 0.15
+        avg_ax = group_center[axis_index]
+        bbox_keys = ["dx", "dy", "dz"]
+        near_parting = abs(avg_ax - parting_z) < bbox.get(bbox_keys[axis_index], 100) * 0.15
         small_area = total_area < 100  # mm²
 
         if near_parting and small_area:
@@ -328,14 +371,18 @@ def generate_mold_layout(slides: list, bbox: dict, parting_z: float) -> dict:
 # ─── 메인 분석 함수 ────────────────────────────────
 
 def analyze_slides(undercuts: list, face_results: list,
-                   bbox: dict, parting_z: float) -> tuple:
+                   bbox: dict, parting_z: float,
+                   axis_index: int = 2) -> tuple:
     """슬라이드 코어 전체 분석을 수행합니다.
+
+    Args:
+        axis_index: 열림 방향 축 인덱스 (0=X, 1=Y, 2=Z)
 
     Returns:
         (slides, mold_layout)
     """
-    groups = group_undercuts(undercuts, face_results)
-    slides = analyze_slide_cores(groups, bbox, parting_z)
+    groups = group_undercuts(undercuts, face_results, axis_index=axis_index)
+    slides = analyze_slide_cores(groups, bbox, parting_z, axis_index=axis_index)
     layout = generate_mold_layout(slides, bbox, parting_z)
 
     return slides, layout
